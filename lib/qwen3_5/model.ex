@@ -9,7 +9,10 @@ defmodule Qwen3_5.Model do
 
   import Nx.Defn
 
-  alias Qwen3_5.{Attention, Config, Layers}
+  alias Qwen3_5.Attention
+  alias Qwen3_5.Config
+  alias Qwen3_5.Layers
+  alias Qwen3_5.LoRA
 
   @doc """
   Logits for a batch of token ids.
@@ -88,8 +91,7 @@ defmodule Qwen3_5.Model do
   makes the call self-contained.
   """
   def init(%Config{} = config, key, opts \\ []) do
-    lora = lora_settings(opts)
-    walk(plan(config, lora), key, &fill(&1, &2, &3, config, lora))
+    walk(adapted_plan(config, opts), key, &fill(&1, &2, &3, config))
   end
 
   @doc """
@@ -101,11 +103,36 @@ defmodule Qwen3_5.Model do
   """
   def template(%Config{} = config, opts \\ []) do
     {tree, _seed} =
-      walk(plan(config, lora_settings(opts)), nil, fn _role, shape, seed ->
+      walk(adapted_plan(config, opts), nil, fn _role, shape, seed ->
         {Nx.template(shape, config.type), seed}
       end)
 
     tree
+  end
+
+  # `plan/1` describes the base model. Which of its tensors get adapters is a
+  # rewrite over that description rather than part of it, so a different set of
+  # sites is a different matcher and not a different plan.
+  #
+  # `:adapt` replaces the matcher outright and carries its own rank and alpha,
+  # so pairing it with `:rank` or `:alpha` asks for two answers to one question
+  # and is refused rather than silently resolved.
+  defp adapted_plan(config, opts) do
+    opts = Keyword.validate!(opts, [:rank, :alpha, :adapt])
+
+    if Keyword.has_key?(opts, :adapt) and Keyword.take(opts, [:rank, :alpha]) != [] do
+      raise ArgumentError,
+            ":adapt carries its own rank and alpha, so it cannot be given with " <>
+              ":rank or :alpha"
+    end
+
+    matcher =
+      Keyword.get_lazy(opts, :adapt, fn ->
+        %{rank: rank, alpha: alpha} = lora_settings(opts)
+        LoRA.attention_projections(rank, alpha)
+      end)
+
+    LoRA.adapt(plan(config), matcher)
   end
 
   # `:rank` and `:alpha` are the one part of the shape this project picks
@@ -113,14 +140,10 @@ defmodule Qwen3_5.Model do
   # rather than `Keyword.get`, because a misspelled option that silently falls
   # back to the configured value is the kind of thing that is found much later.
   defp lora_settings(opts) do
-    opts = Keyword.validate!(opts, [:rank, :alpha])
-
     rank = Keyword.get_lazy(opts, :rank, fn -> configured(:rank) end)
     alpha = Keyword.get_lazy(opts, :alpha, fn -> configured(:alpha) end)
 
-    unless is_integer(rank) and rank > 0 do
-      raise ArgumentError, "LoRA :rank must be a positive integer, got: #{inspect(rank)}"
-    end
+    LoRA.validate_rank!(rank)
 
     unless is_number(alpha) do
       raise ArgumentError, "LoRA :alpha must be a number, got: #{inspect(alpha)}"
@@ -141,13 +164,13 @@ defmodule Qwen3_5.Model do
   #
   # `lm_head` is absent when the config ties it, which is what makes the tree
   # match the tensors a tied checkpoint actually ships.
-  defp plan(config, lora) do
+  defp plan(config) do
     head_width = config.q_heads * config.head_dim
     kv_width = config.kv_heads * config.head_dim
 
     tree = %{
       embedding: {:tensor, :normal, {config.vocab, config.hidden}},
-      layers: layer_plans(config, lora, head_width, kv_width),
+      layers: layer_plans(config, head_width, kv_width),
       norm: {:tensor, :ones, {config.hidden}}
     }
 
@@ -158,38 +181,26 @@ defmodule Qwen3_5.Model do
     end
   end
 
-  defp layer_plans(config, lora, head_width, kv_width) do
+  defp layer_plans(config, head_width, kv_width) do
     layer = %{
       input_norm: {:tensor, :ones, {config.hidden}},
       post_norm: {:tensor, :ones, {config.hidden}},
       attention: %{
-        q_proj: projection_plan({head_width, config.hidden}, lora),
-        k_proj: projection_plan({kv_width, config.hidden}, lora),
-        v_proj: projection_plan({kv_width, config.hidden}, lora),
-        o_proj: projection_plan({config.hidden, head_width}, lora),
+        q_proj: {:tensor, :projection, {head_width, config.hidden}},
+        k_proj: {:tensor, :projection, {kv_width, config.hidden}},
+        v_proj: {:tensor, :projection, {kv_width, config.hidden}},
+        o_proj: {:tensor, :projection, {config.hidden, head_width}},
         q_norm: {:tensor, :ones, {config.head_dim}},
         k_norm: {:tensor, :ones, {config.head_dim}}
       },
-      gate_proj: {:tensor, :normal, {config.intermediate, config.hidden}},
-      up_proj: {:tensor, :normal, {config.intermediate, config.hidden}},
-      down_proj: {:tensor, :normal, {config.hidden, config.intermediate}}
+      gate_proj: {:tensor, :projection, {config.intermediate, config.hidden}},
+      up_proj: {:tensor, :projection, {config.intermediate, config.hidden}},
+      down_proj: {:tensor, :projection, {config.hidden, config.intermediate}}
     }
 
     # A tuple, not a list: `Nx.LazyContainer` covers tuples and maps but not
     # lists, so a list of layers cannot be a defn input.
     layer |> List.duplicate(config.layers) |> List.to_tuple()
-  end
-
-  # Base weights are `{out, in}`, matching the checkpoint layout. `lora_b`
-  # starts at zero, so the adapted model starts exactly at the base model and
-  # no branch is needed for "no adapter yet".
-  defp projection_plan({out, input} = shape, lora) do
-    %{
-      weight: {:tensor, :normal, shape},
-      lora_a: {:tensor, :lora_a, {lora.rank, input}},
-      lora_b: {:tensor, :zeros, {out, lora.rank}},
-      scale: {:tensor, :scale, {}}
-    }
   end
 
   # The `{:tensor, ...}` clause has to stay first. It is a three-tuple, so the
@@ -226,24 +237,24 @@ defmodule Qwen3_5.Model do
   # The constants — `:ones`, `:zeros`, `:scale` — return the key they were
   # given, so they never advance the sequence. Adding one to `plan/2` leaves
   # every other tensor's values untouched.
-  defp fill(:normal, shape, key, config, _lora) do
+  defp fill(role, shape, key, config) when role in [:normal, :projection] do
     normal(key, shape, config.initializer_range, config.type)
   end
 
   # `a` is scaled by `1/sqrt(in)` rather than drawn from the checkpoint's
   # initializer range, so the initial delta magnitude does not depend on the
   # projection's width.
-  defp fill(:lora_a, {_rank, input} = shape, key, config, _lora) do
+  defp fill(:lora_a, {_rank, input} = shape, key, config) do
     normal(key, shape, 1.0 / :math.sqrt(input), config.type)
   end
 
-  defp fill(:ones, shape, key, config, _lora), do: {constant(1, shape, config.type), key}
-  defp fill(:zeros, shape, key, config, _lora), do: {constant(0, shape, config.type), key}
+  defp fill(:ones, shape, key, config), do: {constant(1, shape, config.type), key}
+  defp fill(:zeros, shape, key, config), do: {constant(0, shape, config.type), key}
 
   # A tensor rather than a float because every value in a map handed to `defn`
   # has to be one.
-  defp fill(:scale, _shape, key, config, lora) do
-    {Nx.tensor(lora.alpha / lora.rank, type: config.type), key}
+  defp fill({:scale, value}, _shape, key, config) do
+    {Nx.tensor(value, type: config.type), key}
   end
 
   defp normal(key, shape, stddev, type) do

@@ -9,7 +9,8 @@ defmodule Qwen3_5.Attention do
 
   import Nx.Defn
 
-  alias Qwen3_5.{Layers, LoRA}
+  alias Qwen3_5.Layers
+  alias Qwen3_5.LoRA
 
   @doc """
   One attention block.

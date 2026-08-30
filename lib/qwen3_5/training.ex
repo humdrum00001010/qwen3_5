@@ -5,7 +5,9 @@ defmodule Qwen3_5.Training do
 
   import Nx.Defn
 
-  alias Qwen3_5.{Config, Layers, Model}
+  alias Qwen3_5.Config
+  alias Qwen3_5.Layers
+  alias Qwen3_5.Model
 
   @doc """
   Mean cross-entropy of predicting each token from the ones before it.
