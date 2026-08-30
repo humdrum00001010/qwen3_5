@@ -1,13 +1,15 @@
-defmodule Qwen3.LoRA do
+defmodule Qwen3_5.LoRA do
   @moduledoc """
   Low-rank adapters, and the only trainable parameters here.
 
-  Qwen3-8B in BF16 is about 16 GB of weights. A full finetune also needs FP32
+  Qwen3.5-8B in BF16 is about 16 GB of weights. A full finetune also needs FP32
   master weights and two Adam moments, roughly 96 GB more, which does not fit
   the two 80 GB cards this targets. Rank-16 adapters on the four attention
   projections are a few tens of megabytes.
 
-  `b` is initialised to zero, so the adapted model starts exactly at the base
+  A projection is `%{weight: , lora_a: , lora_b: , scale: }`. `Qwen3_5.Model`
+  builds it, since it owns the parameter tree; this module is what reads it.
+  `lora_b` starts at zero, so the adapted model starts exactly at the base
   model and no branch is needed for "no adapter yet".
   """
 
@@ -30,29 +32,6 @@ defmodule Qwen3.LoRA do
       |> Nx.multiply(projection.scale)
 
     Nx.add(base, delta)
-  end
-
-  @doc """
-  Builds an adapter pair for a `{out, in}` weight.
-
-  `a` is scaled by `1/sqrt(in)` rather than drawn from a fixed distribution, so
-  the initial delta magnitude does not depend on the projection's width.
-
-  `scale` is a tensor rather than a float because every value in a map handed
-  to `defn` has to be one.
-  """
-  def init(weight, rank, alpha, key) do
-    {out, input} = Nx.shape(weight)
-    type = Nx.type(weight)
-
-    {a, key} = Nx.Random.normal(key, 0.0, 1.0 / :math.sqrt(input), shape: {rank, input})
-
-    {%{
-       weight: weight,
-       lora_a: Nx.as_type(a, type),
-       lora_b: Nx.broadcast(Nx.tensor(0, type: type), {out, rank}),
-       scale: Nx.tensor(alpha / rank, type: type)
-     }, key}
   end
 
   @doc "The adapter tensors, which are what an optimizer should see."

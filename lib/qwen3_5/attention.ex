@@ -1,15 +1,15 @@
-defmodule Qwen3.Attention do
+defmodule Qwen3_5.Attention do
   @moduledoc """
   Grouped-query attention, with the kernel doing the attention.
 
   Everything here is the part FlashAttention-3 does not do: projections,
-  Qwen3's per-head QK norm, and rotary embedding. The kernel takes post-norm,
+  Qwen3.5's per-head QK norm, and rotary embedding. The kernel takes post-norm,
   post-RoPE Q/K/V and returns the attention output.
   """
 
   import Nx.Defn
 
-  alias Qwen3.{Layers, LoRA}
+  alias Qwen3_5.{Layers, LoRA}
 
   @doc """
   One attention block.

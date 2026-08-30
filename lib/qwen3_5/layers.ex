@@ -1,4 +1,4 @@
-defmodule Qwen3.Layers do
+defmodule Qwen3_5.Layers do
   @moduledoc false
 
   import Nx.Defn
@@ -31,10 +31,8 @@ defmodule Qwen3.Layers do
   """
   defn rope(x, cos, sin) do
     {_batch, sequence, _heads, head_dim} = Nx.shape(x)
-    half = div(head_dim, 2)
 
-    left = Nx.slice_along_axis(x, 0, half, axis: 3)
-    right = Nx.slice_along_axis(x, half, half, axis: 3)
+    {left, right} = Nx.split(x, div(head_dim, 2), axis: 3)
     rotated = Nx.concatenate([Nx.negate(right), left], axis: 3)
 
     shaped_cos = Nx.reshape(cos, {1, sequence, 1, head_dim})

@@ -1,11 +1,11 @@
-defmodule Qwen3.Training do
+defmodule Qwen3_5.Training do
   @moduledoc """
   Causal language-model finetuning over the LoRA adapters.
   """
 
   import Nx.Defn
 
-  alias Qwen3.{Config, Layers, Model}
+  alias Qwen3_5.{Config, Layers, Model}
 
   @doc """
   Mean cross-entropy of predicting each token from the ones before it.
@@ -75,8 +75,20 @@ defmodule Qwen3.Training do
 
   defp adapters_only(other), do: other
 
-  @doc "Rotary tables for a sequence length, in the model's dtype."
+  @doc """
+  Rotary tables for a sequence length, in the model's dtype.
+
+  A sequence past the checkpoint's `max_position_embeddings` is refused rather
+  than extrapolated: the table would still build, and the positions past the
+  trained context would be ones the model has never seen.
+  """
   def rope_table(%Config{} = config, sequence) do
+    if sequence > config.max_positions do
+      raise ArgumentError,
+            "sequence #{sequence} exceeds the checkpoint's max_position_embeddings " <>
+              "(#{config.max_positions})"
+    end
+
     Layers.rope_table(sequence, config.head_dim, config.rope_theta, config.type)
   end
 end

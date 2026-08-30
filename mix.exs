@@ -1,9 +1,9 @@
-defmodule Qwen3Finetune.MixProject do
+defmodule Qwen3_5Finetune.MixProject do
   use Mix.Project
 
   def project do
     [
-      app: :qwen3_finetune,
+      app: :qwen3_5_finetune,
       version: "0.1.0",
       elixir: "~> 1.17",
       start_permanent: Mix.env() == :prod,
