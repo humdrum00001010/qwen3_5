@@ -1,7 +1,7 @@
 defmodule Qwen3_5Test do
   use ExUnit.Case, async: true
 
-  alias Qwen3_5.{Config, Model, Training}
+  alias Qwen3_5.{Config, LoRA, Model, Training}
 
   # FlashAttention-3 refuses anything but BF16/FP16 at head dimension 128 or
   # 256, and it refuses every client that is not CUDA. `Nx.Defn.Evaluator`
@@ -148,6 +148,50 @@ defmodule Qwen3_5Test do
     test "an untied tree carries its own lm_head" do
       {params, _key} = Model.init(config(), Nx.Random.key(0))
       assert Nx.shape(params.lm_head) == {config().vocab, config().hidden}
+    end
+  end
+
+  # Which sites carry an adapter is a rewrite over the plan, not part of it.
+  describe "adapt" do
+    test "a matcher that skips everything leaves the base model" do
+      config = config(%{"num_hidden_layers" => 1})
+      {params, key} = Model.init(config, Nx.Random.key(0), adapt: fn _path -> :skip end)
+      q_proj = elem(params.layers, 0).attention.q_proj
+
+      assert %Nx.Tensor{} = q_proj, "an unadapted site is a bare weight"
+      assert LoRA.trainable(params) == %{}
+
+      {cos, sin} = Training.rope_table(config, 8)
+      {tokens, _key} = Nx.Random.randint(key, 0, config.vocab, shape: {1, 8})
+
+      logits =
+        Nx.Defn.jit_apply(
+          &Model.forward/3,
+          [tokens, params, [config: config, cos: cos, sin: sin]],
+          compiler: @compiler
+        )
+
+      assert Nx.shape(logits) == {1, 8, config.vocab}
+    end
+
+    test "a matcher can adapt sites the default never touches" do
+      mlp_only = fn
+        [:layers, _index, :gate_proj] -> {:adapt, 8, 16}
+        _path -> :skip
+      end
+
+      {params, _key} = Model.init(config(), Nx.Random.key(0), adapt: mlp_only)
+      layer = elem(params.layers, 0)
+
+      assert %Nx.Tensor{} = layer.attention.q_proj
+      assert {8, 512} = Nx.shape(layer.gate_proj.lora_a)
+      assert Map.keys(LoRA.trainable(params)) |> length() == 4
+    end
+
+    test "a matcher makes the call self-contained" do
+      # No `:rank`, no `:alpha`, so nothing should reach the environment.
+      {params, _key} = Model.init(config(), Nx.Random.key(0), adapt: fn _ -> :skip end)
+      assert LoRA.trainable(params) == %{}
     end
   end
 
