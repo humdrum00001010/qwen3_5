@@ -1,0 +1,10 @@
+_build/
+deps/
+*.ez
+erl_crash.dump
+
+# ruflo, sometimes used
+.claude-flow
+
+# Hugging Face Hub mirror kept beside the prepared data
+data/
